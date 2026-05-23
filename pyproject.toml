@@ -1,0 +1,25 @@
+[project]
+name = "cilf"
+version = "0.3.0"
+description = "Cross-attentive CILF: frozen LLM + V-JEPA video intuition with hidden-space fusion."
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "transformers",
+  "torchdiffeq",
+  "pyyaml",
+  "tqdm",
+  "imageio",
+  "imageio-ffmpeg",
+  "av",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+demo = ["gradio", "pandas"]
+
+[tool.setuptools.packages.find]
+include = ["cilf*"]
+
+[project.scripts]
+cilf-train = "cilf.train:main"

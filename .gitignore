@@ -1,0 +1,12 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+runs/
+*.pt
+.DS_Store
+data/physion/raw/
+data/physion/PhysionTrain-Dynamics/
+data/physion/PhysionTest-Core/

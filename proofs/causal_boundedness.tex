@@ -1,0 +1,59 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\newtheorem{theorem}{Theorem}
+\newtheorem{assumption}{Assumption}
+\title{Causal Boundedness for CILF-ACI}
+\author{CILF Physion Testbed}
+\begin{document}
+\maketitle
+
+\section{Setup}
+Let $s(t)$ evolve under $\dot{s} = f_\psi(s,a)$ with $f_\psi$ $L$-Lipschitz in $(s,a)$.
+Define integrated energy $E(a)=\int_0^T \mathcal{L}(s(t),a)\,dt$ with $\mathcal{L}$ convex in $s$.
+Adjoint inversion yields $a^* = -\eta \nabla_a E(a)$ and intuition logits $z_J = W_U M a^*$.
+
+The fused distribution is
+\[
+\log P_F(w) = z_L(w) + \alpha z_J(w) - \log Z.
+\]
+The ideal causal target is
+\[
+\log P^*(w) = \log P_{\text{text}}(w) - E_{\text{cause}}(w,s) - \log Z^*.
+\]
+
+\section{Theorem}
+\begin{assumption}[Lipschitz dynamics]
+$\|f_\psi(s_1,a_1)-f_\psi(s_2,a_2)\| \le L(\|s_1-s_2\|+\|a_1-a_2\|)$ for all $s,a$.
+\end{assumption}
+
+\begin{assumption}[Bounded projection]
+$\|M\|_2 \le B_M$, $\|W_U\|_2 \le B_U$.
+\end{assumption}
+
+\begin{assumption}[Approximate inversion]
+$\|\nabla_a E(a^*)\| \le \epsilon_{\text{inv}}$ after adjoint optimization.
+\end{assumption}
+
+\begin{theorem}[Conditional KL bound]
+Under Assumptions 1--3,
+\[
+\mathrm{KL}(P^* \| P_F)
+\le \epsilon_{\text{inv}} B_U B_M + \lambda_{\text{cal}} + C(\alpha),
+\]
+where $\lambda_{\text{cal}} = \mathbb{E}_{w\sim P^*}[|{-E_{\text{cause}}(w,s)} - \alpha z_J(w)|]$ is projector calibration error,
+and $C(\alpha)\to 0$ as $\alpha\to 1$ when $z_J$ is aligned with $-E_{\text{cause}}$ on the support of $P^*$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Write $\mathrm{KL}(P^*\|P_F)=\mathbb{E}_{P^*}[\log P^* - \log P_F]$.
+Substitute the log forms and decompose into (i) LLM mismatch, frozen in CILF, (ii) physics term gap
+$|{-E_{\text{cause}}}-\alpha z_J|$, and (iii) inversion residual.
+For (iii), use $|z_J| \le B_U B_M \|a^*\|$ and $\|a^*\|\propto \|\nabla_a E\|$ by smoothness of $E$.
+Calibration error defines $\lambda_{\text{cal}}$; inversion residual contributes $\epsilon_{\text{inv}} B_U B_M$.
+\end{proof}
+
+\section{O(1) vocabulary complexity}
+Computing $z_J = W_U (M a^*)$ requires one matrix--vector multiply in LM dimension and one unembedding,
+independent of brute-force simulation over $|\mathcal{V}|$ actions.
+
+\end{document}
