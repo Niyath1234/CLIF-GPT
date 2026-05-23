@@ -1,5 +1,12 @@
 # CLIF-GPT
 
+<p align="center">
+  <img src="https://img.shields.io/badge/System%201-Frozen%20LLM-4f46e5?style=for-the-badge&logo=openai&logoColor=white" alt="System 1"/>
+  <img src="https://img.shields.io/badge/Cross--Attention-Fusion-8b5cf6?style=for-the-badge" alt="Fusion"/>
+  <img src="https://img.shields.io/badge/System%202-Video%20ODE-f59e0b?style=for-the-badge" alt="System 2"/>
+  <img src="https://img.shields.io/badge/Output-Hidden%20Bias%20%2B%20LM%20Head-10b981?style=for-the-badge" alt="Output"/>
+</p>
+
 Cross-attentive **C**ausal-**I**ntuitive **L**ogit **F**usion: frozen LLM + trainable video dynamics for zero-shot kinetic transfer.
 
 CILF couples a **frozen small LLM** (language context) with a **trainable video dynamics branch** (Physion-style causal intuition). Text and video token sequences interact through **bidirectional cross-attention**; a low-rank projector turns the joint representation into a **hidden-space bias** that steers the LM head on novel English prompts—without per-video lookup.
@@ -10,7 +17,7 @@ Block flow (Transformer-style: **video dynamics** ≈ encoder, **frozen LLM** �
 
 ```mermaid
 flowchart TB
-  subgraph VIDEO["System 2 · Video dynamics (trainable)"]
+  subgraph VIDEO["🎬 System 2 · Video dynamics (trainable)"]
     direction TB
     VF["Video frames<br/><i>Physion clip</i>"]
     SIG["SigLIP vision encoder<br/><i>frozen</i>"]
@@ -20,7 +27,7 @@ flowchart TB
     VF --> SIG --> PROJ --> ODE --> VT
   end
 
-  subgraph TEXT["System 1 · Language (frozen)"]
+  subgraph TEXT["💬 System 1 · Language (frozen)"]
     direction TB
     PT["Prompt tokens"]
     LLM["Frozen LLM<br/><i>last-layer hidden states</i>"]
@@ -28,7 +35,7 @@ flowchart TB
     PT --> LLM --> HT
   end
 
-  subgraph FUSION["Cross-attention fusion (trainable)"]
+  subgraph FUSION["🔗 Cross-attention fusion (trainable)"]
     direction TB
     CA1["Multi-Head Cross-Attn<br/>Q = H_text · K,V = H_video"]
     N1["Add + Norm"]
@@ -41,7 +48,7 @@ flowchart TB
     JOINT --> BIAS
   end
 
-  subgraph OUT["Decode"]
+  subgraph OUT["✨ Decode"]
     direction TB
     FUSE["Residual fusion<br/>H_fused = H_text[last] + α · H_bias"]
     HEAD["LM head<br/><i>frozen</i>"]
@@ -56,7 +63,7 @@ flowchart TB
   HT --> FUSE
   BIAS --> FUSE
 
-  subgraph LOSS["Training losses (fusion stage)"]
+  subgraph LOSS["📉 Training losses (fusion stage)"]
     direction LR
     L1["CE on fused logits"]
     L2["JEPA energy"]
@@ -67,6 +74,27 @@ flowchart TB
 
   LOGITS -.-> LOSS
   ODE -.-> L2
+
+  classDef videoNode fill:#fbbf24,stroke:#d97706,stroke-width:2px,color:#1c1917
+  classDef textNode fill:#60a5fa,stroke:#2563eb,stroke-width:2px,color:#ffffff
+  classDef fusionNode fill:#c4b5fd,stroke:#7c3aed,stroke-width:2px,color:#1e1b4b
+  classDef outNode fill:#34d399,stroke:#059669,stroke-width:2px,color:#064e3b
+  classDef lossNode fill:#fda4af,stroke:#e11d48,stroke-width:2px,color:#4c0519
+
+  class VF,SIG,PROJ,ODE,VT videoNode
+  class PT,LLM,HT textNode
+  class CA1,N1,CA2,N2,JOINT,BIAS fusionNode
+  class FUSE,HEAD,LOGITS outNode
+  class L1,L2,L3,L4,L5 lossNode
+
+  style VIDEO fill:#fff7ed,stroke:#ea580c,stroke-width:3px,color:#9a3412
+  style TEXT fill:#eff6ff,stroke:#2563eb,stroke-width:3px,color:#1e3a8a
+  style FUSION fill:#f5f3ff,stroke:#7c3aed,stroke-width:3px,color:#4c1d95
+  style OUT fill:#ecfdf5,stroke:#059669,stroke-width:3px,color:#065f46
+  style LOSS fill:#fff1f2,stroke:#e11d48,stroke-width:3px,color:#9f1239
+
+  linkStyle 6,7,8,9 stroke:#8b5cf6,stroke-width:2px
+  linkStyle 10,11 stroke:#10b981,stroke-width:2px
 ```
 
 **Equations**
@@ -106,7 +134,6 @@ scripts/
   setup_venv.sh
   build_kinetic_transfer_manifests.py
   prove_transfer.py
-  demo_usp_transfer.py
 ```
 
 ## Setup
@@ -114,7 +141,7 @@ scripts/
 ```bash
 bash scripts/setup_venv.sh
 source .venv/bin/activate
-pip install -e ".[demo]"   # optional: Gradio dashboard
+pip install -e .
 ```
 
 Place Physion clips under `data/physion/` (paths in manifests are relative to each manifest file).
@@ -142,14 +169,6 @@ python scripts/prove_transfer.py \
   --config configs/cilf.yaml \
   --manifest data/kinetic_transfer/manifest_kinetic_transfer.jsonl
 ```
-
-## Demo
-
-```bash
-python scripts/demo_usp_transfer.py
-```
-
-Open http://127.0.0.1:7860 — upload a Physion clip, enter a held-out prompt, and compare LLM-only vs video vs fused kinetic distributions.
 
 ## Design intent
 
