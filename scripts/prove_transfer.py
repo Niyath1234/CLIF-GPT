@@ -48,6 +48,10 @@ def evaluate(
 ) -> None:
     with Path(config_path).open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
+    # support quick MDS-SheafNet test flag via config override
+    if config.get("mds_sheafnet", False):
+        config.setdefault("model", {})["use_sheaf_alignment"] = True
+        config.setdefault("model", {})["use_tropical_fusion"] = True
     import os
 
     forced = os.environ.get("CILF_FORCE_DEVICE")
@@ -148,6 +152,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--manifest", default="data/kinetic_transfer/manifest_kinetic_transfer.jsonl")
     parser.add_argument("--alpha-scale", type=float, default=1.0)
+    parser.add_argument("--mds", action="store_true", help="Activate MDS-SheafNet model flags (sheaf+tropical)")
     parser.add_argument("--device", default=None, help="Override device (cpu/mps/cuda).")
     return parser.parse_args()
 
@@ -164,6 +169,26 @@ def main() -> None:
         import os
 
         os.environ["CILF_FORCE_DEVICE"] = args.device
+    # pass MDS flag into loaded config
+    with Path(args.config).open("r", encoding="utf-8") as handle:
+        cfg = yaml.safe_load(handle)
+    if args.mds:
+        cfg.setdefault("model", {})["use_sheaf_alignment"] = True
+        cfg.setdefault("model", {})["use_tropical_fusion"] = True
+        # write a temporary in-memory config path by passing dict directly to make model below
+        # but reuse evaluate signature: we will write a small temp file
+        import tempfile, json
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yaml") as fh:
+            yaml.safe_dump(cfg, fh)
+            temp_cfg = fh.name
+        evaluate(
+            config_path=temp_cfg,
+            checkpoint_path=checkpoint,
+            manifest_path=args.manifest,
+            alpha_scale=float(args.alpha_scale),
+        )
+        return
     evaluate(
         config_path=args.config,
         checkpoint_path=checkpoint,

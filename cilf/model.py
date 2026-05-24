@@ -186,6 +186,9 @@ class CILFModel(nn.Module):
         bottleneck_dim: int = 64,
         cross_attention_heads: int = 4,
         cross_attention_dropout: float = 0.0,
+        use_sheaf_alignment: bool = False,
+        sheaf_threshold: float = 5.0,
+        use_tropical_fusion: bool = False,
     ) -> None:
         super().__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(llm_name)
@@ -224,6 +227,16 @@ class CILFModel(nn.Module):
             method=ode_method,
             use_adjoint=ode_use_adjoint,
         )
+        self.use_sheaf_alignment = use_sheaf_alignment
+        self.sheaf_threshold = float(sheaf_threshold)
+        self.use_tropical_fusion = use_tropical_fusion
+        # Tropical fusion parameters (stable, bounded offset per-dimension)
+        self.tropical_projector = nn.Linear(llm_dim, llm_dim)
+        self.tropical_W_raw = nn.Parameter(torch.zeros(llm_dim))
+        self.tropical_clip = float(10.0)
+        # Sheaf projection operators: semantic (text) and physical (state->hidden)
+        self.rho_sem = nn.Linear(llm_dim, llm_dim)
+        self.rho_phys = nn.Linear(state_dim, llm_dim)
         self.video_token_projector = nn.Sequential(
             nn.Linear(state_dim, llm_dim),
             nn.LayerNorm(llm_dim),
@@ -265,6 +278,7 @@ class CILFModel(nn.Module):
             use_cache=False,
         )
         last_indices = attention_mask.sum(dim=1).clamp_min(1) - 1
+        last_indices = last_indices.long()
         batch_indices = torch.arange(input_ids.shape[0], device=input_ids.device)
         text_tokens = llm_outputs.hidden_states[-1]
         text_hidden = text_tokens[batch_indices, last_indices]
@@ -279,6 +293,74 @@ class CILFModel(nn.Module):
         result = self.dynamics(current_state, action, return_trajectory=True)
         predicted_next_state, trajectory = result
         return predicted_next_state, trajectory
+
+    def _align_text_to_physical(
+        self,
+        text_tokens: torch.Tensor,
+        trajectory: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map discrete text positions onto the continuous physical trajectory."""
+        batch_size, seq_len, _ = text_tokens.shape
+        num_states = trajectory.shape[1]
+        if num_states == 1:
+            return trajectory.expand(batch_size, seq_len, -1)
+
+        positions = torch.linspace(0.0, float(num_states - 1), steps=seq_len, device=trajectory.device)
+        lower = positions.floor().long().clamp(max=num_states - 2)
+        upper = (lower + 1).clamp(max=num_states - 1)
+        fraction = (positions - lower.float()).unsqueeze(0).unsqueeze(-1)
+
+        lower_states = trajectory[:, lower, :]
+        upper_states = trajectory[:, upper, :]
+        return lower_states * (1.0 - fraction) + upper_states * fraction
+
+    def _cell_complex_incidence(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Simple incidence matrix for a 1D cell complex over token positions.
+
+        Returns an edge incidence tensor of shape [edges, 2] with indices for lower/upper nodes.
+        """
+        if seq_len <= 1:
+            return torch.empty((0, 2), dtype=torch.long, device=device)
+        lower = torch.arange(0, seq_len - 1, device=device, dtype=torch.long)
+        upper = lower + 1
+        return torch.stack([lower, upper], dim=1)
+
+    def _compute_sheaf_obstruction(
+        self,
+        text_tokens: torch.Tensor,
+        trajectory: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute a sheaf-style discrepancy score between text and physical state sequences.
+
+        Implements rho_sem(H_text) and rho_phys(hat_s_T) per Section 4.6/4.9 and
+        returns both a scalar obstruction per-sample and a per-dimension obstruction vector.
+        """
+        # semantic projection: summarize text hidden-space per sample
+        # use per-token hidden states mean as H_text summary
+        h_text_summary = text_tokens.mean(dim=1)
+        rho_sem_h = self.rho_sem(h_text_summary)
+
+        # physical projection: use terminal predicted state from trajectory (last step)
+        phys_terminal = trajectory[:, -1]
+        rho_phys_s = self.rho_phys(phys_terminal)
+
+        # per-dimension discrepancy vector and scalar L2 obstruction
+        obstruction_vector = rho_sem_h - rho_phys_s
+        obstruction_scalar = torch.norm(obstruction_vector, p=2, dim=-1)
+        return obstruction_scalar, obstruction_vector
+
+    def _tropical_fuse(
+        self,
+        text_hidden: torch.Tensor,
+        h_bias: torch.Tensor,
+    ) -> torch.Tensor:
+        """Stable min-plus fusion of the hidden bias and the LLM hidden state."""
+        # bounded per-dimension offset to avoid numerical explosion
+        W = torch.tanh(self.tropical_W_raw) * self.tropical_clip
+        bias_transformed = self.tropical_projector(h_bias)
+        # compute min(text_hidden, W + h_bias) per-dimension in a vectorized manner
+        rhs = h_bias + W
+        return torch.minimum(text_hidden, rhs)
 
     def predict_next_state(
         self,
@@ -322,6 +404,7 @@ class CILFModel(nn.Module):
         attention_mask: torch.Tensor,
         video_tokens: torch.Tensor,
         alpha_scale: float,
+        trajectory: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         lm_head = self.llm.get_output_embeddings()
         text_key_padding_mask = attention_mask == 0
@@ -331,9 +414,27 @@ class CILFModel(nn.Module):
             text_key_padding_mask=text_key_padding_mask,
         )
         last_indices = attention_mask.sum(dim=1).clamp_min(1) - 1
+        last_indices = last_indices.long()
         batch_indices = torch.arange(attention_mask.shape[0], device=attention_mask.device)
         h_bias = joint["bias_tokens"][batch_indices, last_indices]
         video_pooled = joint["video_joint"].mean(dim=1)
+        sheaf_obstruction = None
+
+        if self.use_sheaf_alignment and trajectory is not None:
+            sheaf_scalar, sheaf_vector = self._compute_sheaf_obstruction(text_tokens, trajectory)
+            # mask components of h_bias whose per-dimension obstruction exceeds threshold
+            mask = (sheaf_vector.abs() <= self.sheaf_threshold).float()
+
+            # recompute joint with original video tokens, then apply mask to bias
+            joint = self.fusion_block(
+                text_tokens=text_tokens,
+                video_tokens=video_tokens,
+                text_key_padding_mask=text_key_padding_mask,
+            )
+            h_bias = joint["bias_tokens"][batch_indices, last_indices]
+            # apply per-dimension mask to bias (broadcast over batch)
+            h_bias = h_bias * mask
+            video_pooled = joint["video_joint"].mean(dim=1)
 
         if self.fixed_alpha is not None:
             alpha = torch.full(
@@ -345,10 +446,14 @@ class CILFModel(nn.Module):
         else:
             alpha = self.alpha_gate(torch.cat([text_hidden, h_bias], dim=-1)) * alpha_scale
 
-        h_fused = text_hidden + alpha * h_bias
+        if self.use_tropical_fusion:
+            h_fused = self._tropical_fuse(text_hidden, h_bias)
+        else:
+            h_fused = text_hidden + alpha * h_bias
+
         fused_logits = lm_head(h_fused)
         causal_logits = lm_head(h_bias)
-        return {
+        result = {
             "h_causal": h_bias,
             "h_bias": h_bias,
             "h_fused": h_fused,
@@ -359,6 +464,11 @@ class CILFModel(nn.Module):
             "alpha": alpha.squeeze(-1),
             **joint,
         }
+        if self.use_sheaf_alignment and trajectory is not None:
+            # provide both scalar and vector obstruction for downstream losses/diagnostics
+            result["sheaf_obstruction_scalar"] = sheaf_scalar
+            result["sheaf_obstruction_vector"] = sheaf_vector
+        return result
 
     def forward(
         self,
@@ -374,7 +484,14 @@ class CILFModel(nn.Module):
         dynamics = self.predict_next_state(frames, action=action)
         state_delta = dynamics["predicted_next_state"] - dynamics["current_state"]
         video_tokens = self._build_video_tokens(dynamics["visual_states"], state_delta)
-        fusion = self._fuse_joint(text_tokens, text_hidden, attention_mask, video_tokens, alpha_scale)
+        fusion = self._fuse_joint(
+            text_tokens,
+            text_hidden,
+            attention_mask,
+            video_tokens,
+            alpha_scale,
+            trajectory=dynamics["trajectory"],
+        )
         return {
             "lingual_logits": lingual_logits,
             "text_hidden": text_hidden,

@@ -16,6 +16,9 @@ model:
   bottleneck_dim: 64
   cross_attention_heads: 4
   cross_attention_dropout: 0.0
+  use_sheaf_alignment: true
+  sheaf_threshold: 5.0
+  use_tropical_fusion: true
 
 data:
   dataset_class: GeneralCausalVideoDataset
@@ -50,6 +53,7 @@ loss:
   lambda_alpha_warmup: 0.05
   lambda_h_causal: 0.01
   lambda_alignment: 0.1
+  lambda_obstruction: 0.1
   alignment_temperature: 0.07
   use_trajectory_energy: true
   semantic_smoothing_epsilon: 0.1

@@ -31,10 +31,23 @@ def load_config(path: str) -> dict[str, Any]:
         return yaml.safe_load(handle)
 
 
+_SHORTHAND_KEYS = {
+    "stage": ["training", "stage"],
+    "max_steps": ["training", "max_steps"],
+    "checkpoint_path": ["training", "checkpoint_path"],
+    "batch_size": ["training", "batch_size"],
+    "learning_rate": ["training", "learning_rate"],
+}
+
+
 def apply_overrides(config: dict[str, Any], overrides: list[str] | None) -> dict[str, Any]:
     """Apply simple key=value CLI overrides to a loaded YAML config."""
 
-    for override in overrides or []:
+    expanded: list[str] = []
+    for item in overrides or []:
+        expanded.extend(part.strip() for part in item.split(",") if part.strip())
+
+    for override in expanded:
         if "=" not in override:
             raise ValueError(f"Invalid override {override!r}; expected key=value.")
         raw_key, raw_value = override.split("=", 1)
@@ -42,8 +55,7 @@ def apply_overrides(config: dict[str, Any], overrides: list[str] | None) -> dict
         if not key:
             raise ValueError(f"Invalid override {override!r}; key cannot be empty.")
 
-        # Common shorthand for switching the two training stages from one config.
-        path = ["training", "stage"] if key == "stage" else key.split(".")
+        path = _SHORTHAND_KEYS.get(key, key.split("."))
         value = yaml.safe_load(raw_value)
         cursor: dict[str, Any] = config
         for part in path[:-1]:
@@ -164,6 +176,9 @@ def make_model(config: dict[str, Any], device: torch.device) -> CILFModel:
         bottleneck_dim=int(model_cfg.get("bottleneck_dim", 64)),
         cross_attention_heads=int(model_cfg.get("cross_attention_heads", 4)),
         cross_attention_dropout=float(model_cfg.get("cross_attention_dropout", 0.0)),
+        use_sheaf_alignment=bool(model_cfg.get("use_sheaf_alignment", False)),
+        sheaf_threshold=float(model_cfg.get("sheaf_threshold", 5.0)),
+        use_tropical_fusion=bool(model_cfg.get("use_tropical_fusion", False)),
     ).to(device)
     model.llm.eval()
     if model.visual_encoder.freeze_foundation:
@@ -331,6 +346,11 @@ def train_cilf(
                 temperature=float(loss_cfg.get("alignment_temperature", 0.07)),
             )
             alpha_regularizer = outputs["alpha"].mean() * (1.0 - alpha_scale)
+            # sheaf obstruction penalty (optional)
+            obstruction_penalty = 0.0
+            if model.use_sheaf_alignment and "sheaf_obstruction_scalar" in outputs:
+                obstruction_penalty = outputs["sheaf_obstruction_scalar"].mean()
+
             total_loss = (
                 float(loss_cfg.get("lambda_ce", 1.0)) * llm_loss
                 + float(loss_cfg.get("lambda_energy", 1.0)) * causal_loss
@@ -338,6 +358,7 @@ def train_cilf(
                 + float(loss_cfg.get("lambda_h_causal", 0.01)) * reg_loss
                 + float(loss_cfg.get("lambda_alignment", 0.1)) * align_loss
                 + float(loss_cfg.get("lambda_alpha_warmup", 0.1)) * alpha_regularizer
+                + float(loss_cfg.get("lambda_obstruction", 0.1)) * obstruction_penalty
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -466,7 +487,11 @@ def main() -> None:
         "--override",
         action="append",
         default=[],
-        help="Override YAML values, e.g. --override stage=jepa_pretrain or --override training.max_steps=20.",
+        help=(
+            "Override YAML key=value (repeat flag or comma-separate). "
+            "Examples: --override stage=jepa_pretrain --override max_steps=400 "
+            'or --override "stage=jepa_pretrain,max_steps=400".'
+        ),
     )
     args = parser.parse_args()
     config = apply_overrides(load_config(args.config), args.override)
