@@ -7,10 +7,17 @@ import torch.nn as nn
 from transformers import AutoModel, AutoModelForCausalLM
 
 from cilf.dynamics.ode import create_dynamics
+from cilf.objects import ObjectTracker, RelationHead
+from cilf.roi_features import roi_pool_patches
 
 
 class VisionFoundationEncoder(nn.Module):
-    """Visual encoder followed by trainable state projection."""
+    """Visual encoder with trainable state projection and optional patch features.
+
+    The encoder always returns a pooled per-frame state. When ``return_patches``
+    is True in ``forward`` it additionally returns spatial patch features used
+    by the object tracker.
+    """
 
     def __init__(
         self,
@@ -21,13 +28,16 @@ class VisionFoundationEncoder(nn.Module):
         super().__init__()
         if not pretrained:
             self.freeze_foundation = False
-            self.foundation = nn.Sequential(
+            self._conv_stack = nn.Sequential(
                 nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2),
                 nn.GELU(),
                 nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
                 nn.GELU(),
                 nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
                 nn.GELU(),
+            )
+            self.foundation = nn.Sequential(
+                self._conv_stack,
                 nn.AdaptiveAvgPool2d((1, 1)),
                 nn.Flatten(),
             )
@@ -51,26 +61,67 @@ class VisionFoundationEncoder(nn.Module):
             if feature_dim is None:
                 raise ValueError(f"Unable to infer feature_dim from vision model config for {model_name}.")
 
+            vision_config = getattr(self.foundation.config, "vision_config", None)
+            patch_dim_value = None
+            if vision_config is not None:
+                patch_dim_value = getattr(vision_config, "hidden_size", None)
+            if patch_dim_value is None:
+                patch_dim_value = getattr(self.foundation.config, "hidden_size", None)
+            self.patch_feature_dim = int(patch_dim_value or feature_dim)
+
+        if not pretrained:
+            self.patch_feature_dim = 64
+
         self.feature_dim = int(feature_dim)
         self.project = nn.Sequential(
             nn.Linear(self.feature_dim, state_dim),
             nn.LayerNorm(state_dim),
         )
 
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        frames: torch.Tensor,
+        return_patches: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         batch_size, frame_count, channels, height, width = frames.shape
         flat_frames = frames.reshape(batch_size * frame_count, channels, height, width)
+        patch_features_flat: torch.Tensor | None = None
+
         if not self.freeze_foundation:
             features = self.foundation(flat_frames)
+            if return_patches:
+                spatial = self._conv_stack(flat_frames)
+                patch_features_flat = spatial.flatten(2).transpose(1, 2)
         else:
             with torch.no_grad():
-                if hasattr(self.foundation, "get_image_features"):
-                    raw = self.foundation.get_image_features(pixel_values=flat_frames)
+                if return_patches:
+                    vision_model = getattr(self.foundation, "vision_model", None)
+                    if vision_model is None:
+                        vision_model = self.foundation
+                    raw = vision_model(pixel_values=flat_frames)
+                    last_hidden = getattr(raw, "last_hidden_state", None)
+                    if last_hidden is None:
+                        last_hidden = raw if isinstance(raw, torch.Tensor) else None
+                    if last_hidden is None:
+                        raise TypeError("Vision backbone does not expose last_hidden_state for patch features.")
+                    patch_features_flat = last_hidden
+                    features = self._extract_features(raw)
                 else:
-                    raw = self.foundation(pixel_values=flat_frames)
-                features = self._extract_features(raw)
+                    if hasattr(self.foundation, "get_image_features"):
+                        raw = self.foundation.get_image_features(pixel_values=flat_frames)
+                    else:
+                        raw = self.foundation(pixel_values=flat_frames)
+                    features = self._extract_features(raw)
         states = self.project(features)
-        return states.reshape(batch_size, frame_count, -1)
+        states = states.reshape(batch_size, frame_count, -1)
+        if return_patches:
+            if patch_features_flat is None:
+                raise RuntimeError("Failed to obtain patch features from vision backbone.")
+            num_patches = patch_features_flat.shape[1]
+            patch_dim = patch_features_flat.shape[2]
+            patch_features = patch_features_flat.reshape(batch_size, frame_count, num_patches, patch_dim)
+            return states, patch_features
+        return states
 
     @staticmethod
     def _extract_features(raw: object) -> torch.Tensor:
@@ -189,6 +240,12 @@ class CILFModel(nn.Module):
         use_sheaf_alignment: bool = False,
         sheaf_threshold: float = 5.0,
         use_tropical_fusion: bool = False,
+        use_object_tracking: bool = False,
+        num_object_slots: int = 4,
+        slot_iters: int = 2,
+        use_relation_tokens: bool = True,
+        use_detector_tracks: bool = False,
+        max_detector_tracks: int = 6,
     ) -> None:
         super().__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(llm_name)
@@ -257,6 +314,75 @@ class CILFModel(nn.Module):
             nn.Linear(llm_dim // 2, 1),
             nn.Sigmoid(),
         )
+
+        # Token-type embeddings so cross-attention can tell "what kind of video
+        # token am I attending to" instead of having to learn the structure
+        # purely from concatenation order.
+        # 0 = frame, 1 = scene_delta, 2 = object, 3 = object_delta, 4 = relation
+        self.video_token_type_embedding = nn.Embedding(5, llm_dim)
+
+        self.use_object_tracking = bool(use_object_tracking)
+        self.num_object_slots = int(num_object_slots)
+        self.use_relation_tokens = bool(use_relation_tokens)
+        self.use_detector_tracks = bool(use_detector_tracks)
+        self.max_detector_tracks = int(max_detector_tracks)
+
+        # The slot-attention path and the detector-track path share the same
+        # downstream modules (dynamics, projectors, relation head). When
+        # detector tracks are enabled they take precedence at runtime; slot
+        # attention serves as the fallback for samples that come without
+        # precomputed boxes.
+        any_object_path = self.use_object_tracking or self.use_detector_tracks
+
+        if self.use_object_tracking:
+            self.object_tracker = ObjectTracker(
+                num_slots=self.num_object_slots,
+                patch_feature_dim=self.visual_encoder.patch_feature_dim,
+                state_dim=state_dim,
+                iters=int(slot_iters),
+            )
+        else:
+            self.object_tracker = None
+
+        if self.use_detector_tracks:
+            self.roi_projection = nn.Sequential(
+                nn.Linear(self.visual_encoder.patch_feature_dim, state_dim),
+                nn.LayerNorm(state_dim),
+            )
+        else:
+            self.roi_projection = None
+
+        if any_object_path:
+            self.object_dynamics = create_dynamics(
+                dynamics_type,
+                state_dim=state_dim,
+                hidden_dim=jepa_hidden_dim,
+                horizon=ode_horizon,
+                num_steps=ode_steps,
+                method=ode_method,
+                use_adjoint=ode_use_adjoint,
+            )
+            self.object_token_projector = nn.Sequential(
+                nn.Linear(state_dim, llm_dim),
+                nn.LayerNorm(llm_dim),
+            )
+            self.object_delta_projector = nn.Sequential(
+                nn.Linear(state_dim, llm_dim),
+                nn.LayerNorm(llm_dim),
+            )
+            min_slots = max(
+                self.num_object_slots if self.use_object_tracking else 0,
+                self.max_detector_tracks if self.use_detector_tracks else 0,
+            )
+            if self.use_relation_tokens and min_slots >= 2:
+                self.relation_head = RelationHead(state_dim=state_dim, output_dim=llm_dim)
+            else:
+                self.relation_head = None
+        else:
+            self.object_dynamics = None
+            self.object_token_projector = None
+            self.object_delta_projector = None
+            self.relation_head = None
 
     def encode_text(
         self,
@@ -366,8 +492,17 @@ class CILFModel(nn.Module):
         self,
         frames: torch.Tensor,
         action: torch.Tensor | None = None,
+        track_boxes: torch.Tensor | None = None,
+        track_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        visual_states = self.visual_encoder(frames)
+        need_patches = self.use_object_tracking or (
+            self.use_detector_tracks and track_boxes is not None and track_boxes.numel() > 0
+        )
+        if need_patches:
+            visual_states, patch_features = self.visual_encoder(frames, return_patches=True)
+        else:
+            visual_states = self.visual_encoder(frames)
+            patch_features = None
         if visual_states.shape[1] > 1:
             temporal_context = visual_states[:, :-1].mean(dim=1)
         else:
@@ -379,7 +514,7 @@ class CILFModel(nn.Module):
             action = torch.zeros_like(current_state)
 
         predicted_next_state, trajectory = self._run_dynamics(current_state, action)
-        return {
+        outputs: dict[str, torch.Tensor] = {
             "visual_states": visual_states,
             "current_state": current_state,
             "observed_next_state": observed_next_state,
@@ -388,14 +523,138 @@ class CILFModel(nn.Module):
             "action": action,
         }
 
+        per_object_trajectory: torch.Tensor | None = None
+        per_object_mask: torch.Tensor | None = None
+        source_label: str | None = None
+
+        # Detector tracks take precedence when boxes are available -- they
+        # carry real object identity, slot attention has to discover it.
+        if (
+            self.use_detector_tracks
+            and self.roi_projection is not None
+            and patch_features is not None
+            and track_boxes is not None
+            and track_boxes.numel() > 0
+        ):
+            if track_mask is None:
+                track_mask = torch.ones(
+                    track_boxes.shape[0], track_boxes.shape[1], track_boxes.shape[2],
+                    device=track_boxes.device,
+                    dtype=track_boxes.dtype,
+                )
+            pooled = roi_pool_patches(patch_features, track_boxes, track_mask)
+            per_object_trajectory = self.roi_projection(pooled)
+            per_object_mask = track_mask
+            outputs["track_boxes"] = track_boxes
+            outputs["track_mask"] = track_mask
+            source_label = "detector"
+        elif self.use_object_tracking and patch_features is not None:
+            slot_trajectory = self.object_tracker(patch_features)
+            per_object_trajectory = slot_trajectory
+            outputs["slot_trajectory"] = slot_trajectory
+            source_label = "slot"
+
+        if per_object_trajectory is not None and self.object_dynamics is not None:
+            if per_object_trajectory.shape[1] > 1:
+                object_current = per_object_trajectory[:, :-1].mean(dim=1)
+            else:
+                object_current = per_object_trajectory[:, 0]
+            object_observed_next = per_object_trajectory[:, -1]
+
+            batch_size, num_slots, slot_dim = object_current.shape
+            slot_action = (
+                action.unsqueeze(1).expand(-1, num_slots, -1).reshape(batch_size * num_slots, -1)
+            )
+            slot_state_flat = object_current.reshape(batch_size * num_slots, slot_dim)
+            predicted_flat, slot_trajectory_flat = self.object_dynamics(
+                slot_state_flat,
+                slot_action,
+                return_trajectory=True,
+            )
+            predicted_object_next = predicted_flat.reshape(batch_size, num_slots, slot_dim)
+            slot_dynamics_trajectory = slot_trajectory_flat.reshape(
+                batch_size, num_slots, slot_trajectory_flat.shape[1], slot_dim,
+            )
+
+            outputs.update(
+                {
+                    "patch_features": patch_features,
+                    "object_trajectory": per_object_trajectory,
+                    "object_current": object_current,
+                    "object_observed_next": object_observed_next,
+                    "predicted_object_next": predicted_object_next,
+                    "slot_dynamics_trajectory": slot_dynamics_trajectory,
+                    "object_source": source_label or "",
+                }
+            )
+            # Slot trajectory key preserved for backwards-compatible loss code.
+            if "slot_trajectory" not in outputs:
+                outputs["slot_trajectory"] = per_object_trajectory
+            if per_object_mask is not None:
+                outputs["object_mask"] = per_object_mask
+        return outputs
+
     def _build_video_tokens(
         self,
         visual_states: torch.Tensor,
         state_delta: torch.Tensor,
+        slot_trajectory: torch.Tensor | None = None,
+        predicted_object_next: torch.Tensor | None = None,
+        object_current: torch.Tensor | None = None,
+        object_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        video_tokens = self.video_token_projector(visual_states)
-        delta_token = self.delta_token_projector(state_delta).unsqueeze(1)
-        return torch.cat([video_tokens, delta_token], dim=1)
+        """Build the H_video sequence consumed by cross-attention.
+
+        Layout:
+          - frame tokens [B, T, D] tagged with type=0
+          - scene delta token [B, 1, D] tagged with type=1 (existing baseline)
+          - object pooled tokens [B, K, D] tagged with type=2
+          - per-object delta tokens [B, K, D] tagged with type=3
+          - relation tokens [B, K*(K-1), D] tagged with type=4
+
+        Dedicated token-type embeddings let the fusion block tell *what* each
+        token represents without having to recover the structure from
+        concatenation order alone, and let scene-delta and per-object deltas
+        carry distinct semantics rather than being averaged into one "change"
+        signal.
+        """
+
+        def _add_type(tokens: torch.Tensor, type_id: int) -> torch.Tensor:
+            embedding = self.video_token_type_embedding.weight[type_id]
+            return tokens + embedding
+
+        video_tokens = _add_type(self.video_token_projector(visual_states), 0)
+        delta_token = _add_type(self.delta_token_projector(state_delta).unsqueeze(1), 1)
+        tokens = [video_tokens, delta_token]
+
+        if (
+            slot_trajectory is not None
+            and self.object_token_projector is not None
+            and self.object_delta_projector is not None
+        ):
+            if object_mask is not None:
+                weights = object_mask.to(slot_trajectory.dtype).unsqueeze(-1)
+                weighted = slot_trajectory * weights
+                denom = weights.sum(dim=1).clamp_min(1e-6)
+                pooled_objects = weighted.sum(dim=1) / denom
+            else:
+                pooled_objects = slot_trajectory.mean(dim=1)
+            object_tokens = _add_type(self.object_token_projector(pooled_objects), 2)
+            tokens.append(object_tokens)
+
+            if predicted_object_next is not None and object_current is not None:
+                object_delta = predicted_object_next - object_current
+            else:
+                object_delta = slot_trajectory[:, -1] - slot_trajectory[:, 0]
+            object_delta_tokens = _add_type(self.object_delta_projector(object_delta), 3)
+            tokens.append(object_delta_tokens)
+
+            if self.relation_head is not None:
+                relation_tokens = self.relation_head(slot_trajectory)
+                if relation_tokens.shape[1] > 0:
+                    tokens.append(_add_type(relation_tokens, 4))
+
+        return torch.cat(tokens, dim=1)
 
     def _fuse_joint(
         self,
@@ -477,13 +736,27 @@ class CILFModel(nn.Module):
         attention_mask: torch.Tensor,
         alpha_scale: float = 1.0,
         action: torch.Tensor | None = None,
+        track_boxes: torch.Tensor | None = None,
+        track_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         text_hidden, lingual_logits, text_tokens = self.encode_text_sequence(input_ids, attention_mask)
         if action is None:
             action = self.text_to_action(text_hidden)
-        dynamics = self.predict_next_state(frames, action=action)
+        dynamics = self.predict_next_state(
+            frames,
+            action=action,
+            track_boxes=track_boxes,
+            track_mask=track_mask,
+        )
         state_delta = dynamics["predicted_next_state"] - dynamics["current_state"]
-        video_tokens = self._build_video_tokens(dynamics["visual_states"], state_delta)
+        video_tokens = self._build_video_tokens(
+            dynamics["visual_states"],
+            state_delta,
+            slot_trajectory=dynamics.get("slot_trajectory"),
+            predicted_object_next=dynamics.get("predicted_object_next"),
+            object_current=dynamics.get("object_current"),
+            object_mask=dynamics.get("object_mask"),
+        )
         fusion = self._fuse_joint(
             text_tokens,
             text_hidden,

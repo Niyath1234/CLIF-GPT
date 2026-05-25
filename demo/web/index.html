@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CILF — Causal Intuition</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1116;
+      --panel: #181c24;
+      --border: #2a3140;
+      --text: #e8ecf4;
+      --muted: #8b95a8;
+      --accent: #6ee7b7;
+      --accent-dim: #34d39955;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      background-image:
+        radial-gradient(ellipse 80% 50% at 20% -10%, #1a3d3522, transparent),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #2d1f4a22, transparent);
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+    }
+    header h1 {
+      font-family: "Instrument Serif", Georgia, serif;
+      font-size: 2.4rem;
+      font-weight: 400;
+      margin: 0 0 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      max-width: 52ch;
+      line-height: 1.5;
+    }
+    .ask-panel {
+      margin-top: 2rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.25rem 1.35rem;
+    }
+    label {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 88px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0c0e12;
+      color: var(--text);
+      font: inherit;
+      padding: 0.85rem 1rem;
+      line-height: 1.45;
+    }
+    textarea:focus {
+      outline: 2px solid var(--accent-dim);
+      border-color: #3d5c52;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      margin-top: 1rem;
+    }
+    button {
+      font: inherit;
+      font-weight: 600;
+      padding: 0.65rem 1.4rem;
+      border: none;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #0a1210;
+      cursor: pointer;
+      transition: transform 0.12s, opacity 0.12s;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { opacity: 0.45; cursor: wait; }
+    .hint { font-size: 0.8rem; color: var(--muted); }
+    .examples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.75rem;
+    }
+    .chip {
+      font-size: 0.78rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .chip:hover { border-color: var(--accent); color: var(--accent); }
+    .results {
+      margin-top: 2rem;
+      display: grid;
+      gap: 1.25rem;
+    }
+    @media (min-width: 860px) {
+      .results.has-data {
+        grid-template-columns: 1fr 1.05fr;
+        align-items: start;
+      }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.25rem 1.35rem;
+    }
+    .conclusion {
+      font-family: "Instrument Serif", Georgia, serif;
+      font-size: 1.65rem;
+      line-height: 1.35;
+      margin: 0.5rem 0 1rem;
+    }
+    .conclusion em { color: var(--accent); font-style: normal; }
+    .meta { font-size: 0.85rem; color: var(--muted); line-height: 1.55; }
+    .meta strong { color: var(--text); font-weight: 600; }
+    video {
+      width: 100%;
+      border-radius: 10px;
+      background: #000;
+      aspect-ratio: 16 / 10;
+      object-fit: contain;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 6px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      margin-bottom: 0.75rem;
+    }
+    .error {
+      color: #fca5a5;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+    }
+    .hidden { display: none; }
+    .alts {
+      margin-top: 0.75rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .status-line { font-size: 0.8rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Causal intuition from video</h1>
+      <p>
+        Ask anything in plain English. CILF completes your sentence using fused
+        language + physics, and shows the Physion clip whose motion drove that intuition.
+      </p>
+    </header>
+
+    <section class="ask-panel">
+      <label for="question">Your question or story (any topic)</label>
+      <textarea id="question" placeholder="e.g. What happens when a vase slips off the table?"></textarea>
+      <div class="examples">
+        <button type="button" class="chip" data-q="What happens when I trip on the rug while walking?">Trip on rug</button>
+        <button type="button" class="chip" data-q="The two cars met at the intersection and">Car crash</button>
+        <button type="button" class="chip" data-q="The ball started down the hill and">Ball rolling</button>
+        <button type="button" class="chip" data-q="The cup fell off the counter and">Cup drops</button>
+        <button type="button" class="chip" data-q="Why do dominoes knock each other over?">Dominoes</button>
+      </div>
+      <div class="row">
+        <button id="askBtn" type="button">Get conclusion + video</button>
+        <span class="hint">First query scans ~12 candidate clips (~10–20s on laptop GPU).</span>
+      </div>
+      <p id="error" class="error hidden"></p>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="card">
+        <span class="badge" id="dynamicsBadge">physics</span>
+        <label>Final conclusion</label>
+        <p class="conclusion" id="conclusion"></p>
+        <p class="meta" id="meta"></p>
+        <p class="alts" id="alts"></p>
+        <p class="status-line" id="statusLine"></p>
+      </div>
+      <div class="card">
+        <label>Video intuition was drawn from</label>
+        <video id="sourceVideo" controls playsinline preload="metadata"></video>
+        <p class="meta" id="videoMeta"></p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const questionEl = document.getElementById("question");
+    const askBtn = document.getElementById("askBtn");
+    const errorEl = document.getElementById("error");
+    const resultsEl = document.getElementById("results");
+    const conclusionEl = document.getElementById("conclusion");
+    const metaEl = document.getElementById("meta");
+    const altsEl = document.getElementById("alts");
+    const statusLine = document.getElementById("statusLine");
+    const dynamicsBadge = document.getElementById("dynamicsBadge");
+    const sourceVideo = document.getElementById("sourceVideo");
+    const videoMeta = document.getElementById("videoMeta");
+
+    document.querySelectorAll(".chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        questionEl.value = chip.dataset.q || "";
+        questionEl.focus();
+      });
+    });
+
+    async function ask() {
+      const question = questionEl.value.trim();
+      if (!question) {
+        errorEl.textContent = "Type a question first.";
+        errorEl.classList.remove("hidden");
+        return;
+      }
+      errorEl.classList.add("hidden");
+      askBtn.disabled = true;
+      askBtn.textContent = "Thinking…";
+      try {
+        const res = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.statusText);
+
+        resultsEl.classList.remove("hidden");
+        resultsEl.classList.add("has-data");
+
+        const parts = data.conclusion.split(data.next_token);
+        conclusionEl.innerHTML =
+          (parts[0] || "") + "<em>" + data.next_token + "</em>" + (parts[1] || "");
+
+        dynamicsBadge.textContent = data.abstract_dynamics.replaceAll("_", " ");
+        const sourceNote = {
+          kinetic_fusion: "Video outcome + fusion agrees",
+          video_outcome: "Word from matched clip physics (what happens in the video)",
+          open_vocab: "Open vocabulary (high confidence)",
+          video_physics: "Physics label fallback",
+        };
+        metaEl.innerHTML =
+          "<strong>Prompt used:</strong> " + escapeHtml(data.prompt) + "<br>" +
+          "<strong>LLM alone would say:</strong> " + escapeHtml(data.llm_top_token) + "<br>" +
+          "<strong>Video physics outcome:</strong> " + escapeHtml(data.video_outcome || "—") + "<br>" +
+          "<strong>Latent change:</strong> " + escapeHtml(data.causal_state_change || "—") + "<br>" +
+          "<strong>Word source:</strong> " + escapeHtml(sourceNote[data.completion_source] || data.completion_source) + "<br>" +
+          "<strong>Confidence:</strong> " + (100 * data.confidence).toFixed(1) + "%";
+
+        altsEl.textContent = "Other causal verbs: " +
+          (data.top_alternatives || []).map((a) => a.token + " (" + (100 * a.prob).toFixed(1) + "%)").join(", ");
+
+        statusLine.textContent =
+          "Matched clip " + data.stim_id + " · retrieval " + data.retrieval_score.toFixed(3) +
+          " · fusion " + data.fusion_score.toFixed(3);
+
+        sourceVideo.src = data.video_url + "?t=" + Date.now();
+        sourceVideo.load();
+        const trainEnd = (data.train_prompt || "").trim();
+        const fullTrain = trainEnd.endsWith("and") || trainEnd.endsWith("and ")
+          ? trainEnd + " " + (data.video_outcome || "")
+          : trainEnd;
+        videoMeta.innerHTML =
+          "<strong>Training caption on this clip:</strong> " + escapeHtml(fullTrain);
+      } catch (err) {
+        errorEl.textContent = String(err.message || err);
+        errorEl.classList.remove("hidden");
+      } finally {
+        askBtn.disabled = false;
+        askBtn.textContent = "Get conclusion + video";
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    askBtn.addEventListener("click", ask);
+    questionEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask();
+    });
+  </script>
+</body>
+</html>

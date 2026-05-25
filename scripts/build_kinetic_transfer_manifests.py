@@ -20,6 +20,94 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PHYSION_ROOT = PROJECT_ROOT / "data/physion/PhysionTest-Core/Physion"
 
 
+SCENARIO_DYNAMICS: dict[str, str] = {
+    "Dominoes": "support_loss_chain_fall",
+    "Drop": "support_loss_freefall",
+    "Collide": "momentum_transfer_collision",
+    "Roll": "rolling_motion",
+    "Drape": "support_loss_freefall",
+    "Contain": "containment_settle",
+    "Link": "contact_capture",
+    "Support": "support_loss_freefall",
+}
+
+
+SCENARIO_OBJECTS: dict[str, dict[str, str | list[str]]] = {
+    "Dominoes": {
+        "objects": ["domino_a", "domino_b", "ground"],
+        "subject_object": "domino_a",
+        "affected_object": "domino_b",
+        "interaction": "leading domino topples and contacts the next",
+        "precondition": "tiles standing in chain",
+        "postcondition": "tiles fallen on ground",
+        "causal_state_change": "support_lost -> chain_fall -> impact",
+    },
+    "Drop": {
+        "objects": ["object", "table", "ground"],
+        "subject_object": "object",
+        "affected_object": "object",
+        "interaction": "object loses contact with support",
+        "precondition": "object resting on support",
+        "postcondition": "object on ground",
+        "causal_state_change": "support_lost -> freefall -> impact",
+    },
+    "Collide": {
+        "objects": ["object_a", "object_b"],
+        "subject_object": "object_a",
+        "affected_object": "object_b",
+        "interaction": "moving body strikes another",
+        "precondition": "object_a approaches object_b",
+        "postcondition": "object_b deflected or displaced",
+        "causal_state_change": "momentum_transfer -> displacement",
+    },
+    "Roll": {
+        "objects": ["rolling_object", "ramp"],
+        "subject_object": "rolling_object",
+        "affected_object": "rolling_object",
+        "interaction": "object rolls along surface under gravity",
+        "precondition": "object at rest on incline",
+        "postcondition": "object translating along surface",
+        "causal_state_change": "gravity_acts -> rolling_motion",
+    },
+    "Drape": {
+        "objects": ["cloth", "support"],
+        "subject_object": "cloth",
+        "affected_object": "cloth",
+        "interaction": "flexible cloth detaches from support",
+        "precondition": "cloth hung on support",
+        "postcondition": "cloth on ground",
+        "causal_state_change": "support_lost -> freefall",
+    },
+    "Contain": {
+        "objects": ["small_object", "container"],
+        "subject_object": "small_object",
+        "affected_object": "container",
+        "interaction": "object enters container",
+        "precondition": "object above container opening",
+        "postcondition": "object settled inside container",
+        "causal_state_change": "freefall -> containment -> settle",
+    },
+    "Link": {
+        "objects": ["flexible_link", "anchor"],
+        "subject_object": "flexible_link",
+        "affected_object": "anchor",
+        "interaction": "moving link contacts and wraps anchor",
+        "precondition": "link in motion toward anchor",
+        "postcondition": "link constrained by anchor",
+        "causal_state_change": "contact -> capture",
+    },
+    "Support": {
+        "objects": ["object", "support"],
+        "subject_object": "support",
+        "affected_object": "object",
+        "interaction": "support is removed, object follows gravity",
+        "precondition": "object resting on support",
+        "postcondition": "object on ground",
+        "causal_state_change": "support_removed -> freefall -> impact",
+    },
+}
+
+
 SCENARIO_TEMPLATES: dict[str, list[tuple[str, str]]] = {
     "Dominoes": [
         ("I was walking and hit my leg and", "fell"),
@@ -121,17 +209,19 @@ def _emit_rows(
             except ValueError:
                 import os
                 rel_video = Path(os.path.relpath(video.resolve(), manifest_dir.resolve()))
-            rows.append(
-                {
-                    "video_path": str(rel_video),
-                    "prompt": prompt,
-                    "causal_consequence": target,
-                    "causal_trigger": True,
-                    "scenario": f"kinetic_{scenario.lower()}",
-                    "stim_id": video.stem,
-                    "split": "kinetic",
-                }
-            )
+            obj_meta = SCENARIO_OBJECTS.get(scenario, {})
+            row: dict[str, object] = {
+                "video_path": str(rel_video),
+                "prompt": prompt,
+                "causal_consequence": target,
+                "causal_trigger": True,
+                "scenario": f"kinetic_{scenario.lower()}",
+                "stim_id": video.stem,
+                "split": "kinetic",
+                "abstract_dynamics": SCENARIO_DYNAMICS.get(scenario, "unknown_dynamics"),
+            }
+            row.update(obj_meta)
+            rows.append(row)
     return rows
 
 
@@ -197,17 +287,19 @@ def build(
                 continue
             video = rng.choice(videos)
             rel_video = Path(os.path.relpath(video.resolve(), manifest_dir.resolve()))
-            transfer_rows.append(
-                {
-                    "video_path": str(rel_video),
-                    "prompt": prompt,
-                    "causal_consequence": expected_word,
-                    "causal_trigger": True,
-                    "scenario": f"transfer_{scenario_label}_via_{scenario.lower()}",
-                    "stim_id": video.stem,
-                    "split": "transfer",
-                }
-            )
+            obj_meta = SCENARIO_OBJECTS.get(scenario, {})
+            row: dict[str, object] = {
+                "video_path": str(rel_video),
+                "prompt": prompt,
+                "causal_consequence": expected_word,
+                "causal_trigger": True,
+                "scenario": f"transfer_{scenario_label}_via_{scenario.lower()}",
+                "stim_id": video.stem,
+                "split": "transfer",
+                "abstract_dynamics": SCENARIO_DYNAMICS.get(scenario, "unknown_dynamics"),
+            }
+            row.update(obj_meta)
+            transfer_rows.append(row)
 
     train_count = _write_jsonl(train_rows, train_path)
     val_count = _write_jsonl(val_rows, val_path)

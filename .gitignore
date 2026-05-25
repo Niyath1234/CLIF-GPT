@@ -8,5 +8,11 @@ runs/
 *.pt
 .DS_Store
 data/physion/raw/
+data/physion/Physion/
+data/physion/__MACOSX/
 data/physion/PhysionTrain-Dynamics/
 data/physion/PhysionTest-Core/
+data/kinetic_transfer/tracks/
+models/
+demo_outputs/
+*.mp4

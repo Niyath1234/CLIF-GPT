@@ -1,14 +1,17 @@
+# Physion + detector tracks when SigLIP cannot be downloaded (corporate network).
+# Uses a small trainable conv vision encoder; object tracks still drive ROI states.
+# After `scripts/setup_models_brew.sh` succeeds, switch to configs/cilf_physion.yaml.
+
 seed: 23
 device: auto
 verbose: true
-run_name: cilf_cross_attention
+run_name: cilf_physion_office_tracks
 
 model:
   llm_name: distilgpt2
   state_dim: 256
   jepa_hidden_dim: 512
-  vision_pretrained: true
-  vision_model_name: google/siglip-base-patch16-224
+  vision_pretrained: false
   dynamics_type: ode
   ode_steps: 4
   ode_method: rk4
@@ -23,13 +26,17 @@ model:
   num_object_slots: 4
   slot_iters: 2
   use_relation_tokens: true
+  use_detector_tracks: true
+  max_detector_tracks: 6
 
 data:
   dataset_class: GeneralCausalVideoDataset
   manifest_path: data/kinetic_transfer/manifest_kinetic_train.jsonl
   val_manifest_path: data/kinetic_transfer/manifest_kinetic_val.jsonl
+  tracks_dir: data/kinetic_transfer/tracks
+  max_tracks: 6
   vocab_mode: full
-  num_frames: 6
+  num_frames: 8
   image_size: 224
   fps: 8
   max_prompt_length: 48
@@ -37,13 +44,13 @@ data:
 training:
   stage: cilf_fusion
   checkpoint_path: null
-  output_dir: runs/cilf
-  batch_size: 4
+  output_dir: runs/cilf_physion_office
+  batch_size: 2
   num_workers: 0
   learning_rate: 0.0005
   weight_decay: 0.01
   grad_clip: 1.0
-  max_steps: 1500
+  max_steps: 2000
   log_every: 25
   save_every: 250
   val_every: 250
@@ -63,8 +70,8 @@ loss:
   semantic_smoothing_epsilon: 0.1
   semantic_neighbor_count: 24
   lambda_object_consistency: 0.1
-  lambda_object_dynamics: 0.2
+  lambda_object_dynamics: 0.3
   object_consistency_temperature: 0.1
   object_margin: 0.2
-  lambda_transition: 0.1
+  lambda_transition: 0.2
   transition_temperature: 0.1

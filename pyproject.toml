@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-demo = ["gradio", "pandas"]
+demo = ["gradio", "pandas", "flask"]
+detect = ["ultralytics>=8.3.0", "opencv-python>=4.8.0"]
 
 [tool.setuptools.packages.find]
 include = ["cilf*"]

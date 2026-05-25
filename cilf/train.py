@@ -16,8 +16,11 @@ from transformers import AutoTokenizer
 
 from cilf.data import GeneralCausalVideoDataset
 from cilf.losses import (
+    abstract_dynamics_contrastive_loss,
     causal_hidden_l2_regularization,
     energy_loss,
+    object_dynamics_energy_loss,
+    object_temporal_consistency_loss,
     text_video_contrastive_loss,
     trajectory_energy_loss,
     vicreg_variance_loss,
@@ -148,6 +151,8 @@ def build_dataloader(
         image_size=int(data_cfg.get("image_size", 224)),
         fps=int(data_cfg.get("fps", 10)),
         max_prompt_length=int(data_cfg.get("max_prompt_length", 64)),
+        tracks_dir=data_cfg.get("tracks_dir"),
+        max_tracks=int(data_cfg.get("max_tracks", 0)),
     )
     return DataLoader(
         dataset,
@@ -179,6 +184,12 @@ def make_model(config: dict[str, Any], device: torch.device) -> CILFModel:
         use_sheaf_alignment=bool(model_cfg.get("use_sheaf_alignment", False)),
         sheaf_threshold=float(model_cfg.get("sheaf_threshold", 5.0)),
         use_tropical_fusion=bool(model_cfg.get("use_tropical_fusion", False)),
+        use_object_tracking=bool(model_cfg.get("use_object_tracking", False)),
+        num_object_slots=int(model_cfg.get("num_object_slots", 4)),
+        slot_iters=int(model_cfg.get("slot_iters", 2)),
+        use_relation_tokens=bool(model_cfg.get("use_relation_tokens", True)),
+        use_detector_tracks=bool(model_cfg.get("use_detector_tracks", False)),
+        max_detector_tracks=int(model_cfg.get("max_detector_tracks", 6)),
     ).to(device)
     model.llm.eval()
     if model.visual_encoder.freeze_foundation:
@@ -191,6 +202,25 @@ def move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     for key, value in batch.items():
         moved[key] = value.to(device) if torch.is_tensor(value) else value
     return moved
+
+
+def abstract_dynamics_group_ids(
+    labels: list[str] | tuple[str, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    """Map string labels to integer group ids. ``unknown_dynamics`` -> -1."""
+
+    name_to_id: dict[str, int] = {}
+    ids: list[int] = []
+    for label in labels:
+        text = str(label).strip()
+        if not text or text == "unknown_dynamics":
+            ids.append(-1)
+            continue
+        if text not in name_to_id:
+            name_to_id[text] = len(name_to_id)
+        ids.append(name_to_id[text])
+    return torch.tensor(ids, dtype=torch.long, device=device)
 
 
 def semantic_soft_ce(
@@ -322,6 +352,8 @@ def train_cilf(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 alpha_scale=alpha_scale,
+                track_boxes=batch.get("track_boxes"),
+                track_mask=batch.get("track_mask"),
             )
             corrupted_state = corrupt_next_state(outputs["observed_next_state"], batch["causal_trigger_label"])
 
@@ -346,10 +378,39 @@ def train_cilf(
                 temperature=float(loss_cfg.get("alignment_temperature", 0.07)),
             )
             alpha_regularizer = outputs["alpha"].mean() * (1.0 - alpha_scale)
-            # sheaf obstruction penalty (optional)
             obstruction_penalty = 0.0
             if model.use_sheaf_alignment and "sheaf_obstruction_scalar" in outputs:
                 obstruction_penalty = outputs["sheaf_obstruction_scalar"].mean()
+
+            object_consistency_loss = torch.tensor(0.0, device=device)
+            object_dynamics_loss = torch.tensor(0.0, device=device)
+            object_pos_energy = torch.tensor(0.0, device=device)
+            object_neg_energy = torch.tensor(0.0, device=device)
+            has_object_signal = (
+                "predicted_object_next" in outputs
+                and "object_observed_next" in outputs
+                and "slot_trajectory" in outputs
+            )
+            if has_object_signal:
+                object_consistency_loss = object_temporal_consistency_loss(
+                    outputs["slot_trajectory"],
+                    temperature=float(loss_cfg.get("object_consistency_temperature", 0.1)),
+                )
+                object_dynamics_loss, object_pos_energy, object_neg_energy = object_dynamics_energy_loss(
+                    outputs["predicted_object_next"],
+                    outputs["object_observed_next"].detach(),
+                    margin=float(loss_cfg.get("object_margin", 0.2)),
+                )
+
+            transition_loss = torch.tensor(0.0, device=device)
+            dynamics_labels = batch.get("abstract_dynamics")
+            if dynamics_labels is not None and float(loss_cfg.get("lambda_transition", 0.0)) > 0.0:
+                group_ids = abstract_dynamics_group_ids(list(dynamics_labels), device)
+                transition_loss = abstract_dynamics_contrastive_loss(
+                    outputs["h_bias"],
+                    group_ids,
+                    temperature=float(loss_cfg.get("transition_temperature", 0.1)),
+                )
 
             total_loss = (
                 float(loss_cfg.get("lambda_ce", 1.0)) * llm_loss
@@ -359,6 +420,9 @@ def train_cilf(
                 + float(loss_cfg.get("lambda_alignment", 0.1)) * align_loss
                 + float(loss_cfg.get("lambda_alpha_warmup", 0.1)) * alpha_regularizer
                 + float(loss_cfg.get("lambda_obstruction", 0.1)) * obstruction_penalty
+                + float(loss_cfg.get("lambda_object_consistency", 0.1)) * object_consistency_loss
+                + float(loss_cfg.get("lambda_object_dynamics", 0.2)) * object_dynamics_loss
+                + float(loss_cfg.get("lambda_transition", 0.0)) * transition_loss
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -372,11 +436,23 @@ def train_cilf(
             if global_step == 1 or global_step % log_every == 0:
                 accuracy = (outputs["fused_logits"].argmax(dim=-1) == batch["target_token_id"]).float().mean()
                 margin = (negative_energy - positive_energy).item()
+                obj_line = ""
+                if has_object_signal:
+                    obj_line = (
+                        " obj_consist={oc:.4f} obj_dyn={od:.4f} obj_posE={op:.4f} obj_negE={on:.4f}".format(
+                            oc=float(object_consistency_loss.item()),
+                            od=float(object_dynamics_loss.item()),
+                            op=float(object_pos_energy.item()),
+                            on=float(object_neg_energy.item()),
+                        )
+                    )
+                if float(loss_cfg.get("lambda_transition", 0.0)) > 0.0:
+                    obj_line += " transition={tr:.4f}".format(tr=float(transition_loss.item()))
                 line = (
                     "stage=cilf step={step} total={total:.4f} ce={ce:.4f} acc={acc:.3f} "
                     "energy={energy:.4f} posE={pos:.4f} negE={neg:.4f} margin={margin:.4f} "
                     "align={align:.4f} reg={reg:.4f} var={var:.4f} "
-                    "alpha={alpha:.3f} alpha_scale={scale:.2f}".format(
+                    "alpha={alpha:.3f} alpha_scale={scale:.2f}{obj}".format(
                         step=global_step,
                         total=total_loss.item(),
                         ce=llm_loss.item(),
@@ -390,6 +466,7 @@ def train_cilf(
                         var=variance_loss.item(),
                         alpha=outputs["alpha"].mean().item(),
                         scale=alpha_scale,
+                        obj=obj_line,
                     )
                 )
                 progress.write(line)
@@ -433,6 +510,8 @@ def evaluate(model: CILFModel, dataloader: DataLoader, device: torch.device) -> 
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             alpha_scale=1.0,
+            track_boxes=batch.get("track_boxes"),
+            track_mask=batch.get("track_mask"),
         )
         corrupted_state = corrupt_next_state(outputs["observed_next_state"], batch["causal_trigger_label"])
         _, positive_energy, negative_energy = compute_energy(

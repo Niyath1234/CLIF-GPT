@@ -4,5 +4,8 @@ __all__ = [
     "data",
     "losses",
     "model",
+    "objects",
+    "roi_features",
+    "track_io",
     "vocab",
 ]
