@@ -4,7 +4,7 @@
   <img src="docs/images/demo_localhost.png" alt="CILF localhost demo: ask a question, get a fused conclusion and the Physion video that drove the intuition" width="920"/>
 </p>
 
-<p align="center"><em>Localhost demo — type any prompt (e.g. <code>i moved towards the edge of the building and</code>), get a physics-backed completion plus the source clip. Run with <code>python scripts/demo_localhost.py</code>.</em></p>
+<p align="center"><em>Localhost demo (not hosted yet on any platform) — type any prompt (e.g. <code>i moved towards the edge of the building and</code>), get a physics-backed completion plus the source clip. Run with <code>python scripts/demo_localhost.py</code>.</em></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/System%201-Frozen%20LLM-4f46e5?style=for-the-badge&logo=openai&logoColor=white" alt="System 1"/>
